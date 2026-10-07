@@ -361,6 +361,18 @@ function openDispatch(rows: DefectRow[]): void {
 
 async function submitDispatch(): Promise<void> {
   if (dispatchTargets.value.length === 0) return
+  // 未决外委对账冲突未裁决前不能新生成工单（改派已有工单不阻断）
+  const blocked = dispatchTargets.value.filter(
+    (row) =>
+      workOrderStore.ordersOfDefect(row.defect.id).length === 0 &&
+      workOrderStore.pendingConflictDefectIds().has(row.defect.id)
+  )
+  if (blocked.length > 0) {
+    ElMessage.error(
+      `${blocked.length} 条缺陷存在未决的外委对账冲突，请先到批次对账页由负责人裁决后再派工`
+    )
+    return
+  }
   dispatchSubmitting.value = true
   try {
     let created = 0

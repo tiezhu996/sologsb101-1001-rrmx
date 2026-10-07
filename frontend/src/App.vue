@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Document, Grid, Odometer, Tools, WarningFilled } from '@element-plus/icons-vue'
+import { Connection, Document, Grid, Odometer, Tools, WarningFilled } from '@element-plus/icons-vue'
 import { useTurbineStore } from '@/stores/turbineStore'
 import { useBladeStore } from '@/stores/bladeStore'
 import { useDefectStore } from '@/stores/defectStore'
 import { useWorkOrderStore } from '@/stores/workOrderStore'
+import { useReconcileStore } from '@/stores/reconcileStore'
 import { DB_NAME, DB_VERSION } from '@/utils/db'
 
 const route = useRoute()
@@ -14,6 +15,7 @@ const turbineStore = useTurbineStore()
 const bladeStore = useBladeStore()
 const defectStore = useDefectStore()
 const workOrderStore = useWorkOrderStore()
+const reconcileStore = useReconcileStore()
 
 /** 叶片分段页的跳转目标：上次查看的叶片 → 当前机组的首片叶片 → 全库首片叶片 */
 const targetBladeId = computed<string | null>(() => {
@@ -60,6 +62,13 @@ const navItems = computed(() => {
       disabled: false
     },
     {
+      path: '/reconcile',
+      label: '批次对账',
+      icon: Connection,
+      badge: reconcileStore.pendingConflictCount > 0 ? String(reconcileStore.pendingConflictCount) : '',
+      disabled: false
+    },
+    {
       path: '/report',
       label: '报告与导出',
       icon: Document,
@@ -74,6 +83,7 @@ const activePath = computed(() => {
     const bladeId = targetBladeId.value
     return bladeId ? `/blades/${bladeId}/segments` : route.path
   }
+  if (route.path.startsWith('/reconcile')) return '/reconcile'
   return route.path
 })
 

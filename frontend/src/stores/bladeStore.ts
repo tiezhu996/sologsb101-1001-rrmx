@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
-import { db, readUiPrefs, round2, writeUiPrefs } from '@/utils/db'
+import { db, detachReconcileLinksForDefects, readUiPrefs, round2, writeUiPrefs } from '@/utils/db'
 import { useIdbTable } from '@/hooks/useIdbTable'
 import type { Blade, BladeStat } from '@/types/blade'
 import type { Segment, SegmentGenerateOptions, SegmentStat } from '@/types/segment'
@@ -128,7 +128,8 @@ export const useBladeStore = defineStore('blade', () => {
     const defectIds = defects.value
       .filter((defect) => segmentIds.includes(defect.segmentId))
       .map((defect) => defect.id)
-    await db.transaction('rw', [db.segments, db.defects, db.workOrders], async () => {
+    await db.transaction('rw', [db.segments, db.defects, db.workOrders, db.reconcileLinks], async () => {
+      await detachReconcileLinksForDefects(defectIds)
       await db.workOrders.where('defectId').anyOf(defectIds).delete()
       await db.defects.bulkDelete(defectIds)
       await db.segments.bulkDelete(segmentIds)
@@ -205,7 +206,8 @@ export const useBladeStore = defineStore('blade', () => {
   async function removeSegment(id: string): Promise<void> {
     const segment = segments.value.find((item) => item.id === id)
     const defectIds = defectsOfSegment(id).map((defect) => defect.id)
-    await db.transaction('rw', [db.segments, db.defects, db.workOrders], async () => {
+    await db.transaction('rw', [db.segments, db.defects, db.workOrders, db.reconcileLinks], async () => {
+      await detachReconcileLinksForDefects(defectIds)
       await db.workOrders.where('defectId').anyOf(defectIds).delete()
       await db.defects.bulkDelete(defectIds)
       await db.segments.delete(id)

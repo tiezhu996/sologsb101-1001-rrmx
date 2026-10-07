@@ -27,6 +27,10 @@ export interface Defect {
   /** 发现日期 YYYY-MM-DD */
   foundAt: string
   state: DefectState
+  /** 由外委现场记录派生时的来源批次 id */
+  sourceBatchId?: string
+  /** 由外委现场记录派生时的来源现场记录 id */
+  sourceFieldRowId?: string
   createdAt: number
   updatedAt: number
 }

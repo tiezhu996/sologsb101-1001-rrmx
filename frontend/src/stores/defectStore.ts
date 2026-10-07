@@ -224,14 +224,36 @@ export const useDefectStore = defineStore('defect', () => {
 
   async function updateDefect(id: string, patch: Partial<Defect>): Promise<void> {
     await defectsTable.update(id, patch)
+    // 本机缺陷后来修改：重算与其相关的未决对账冲突（已决 / 工单快照不受影响）
+    await reconcileAfterDefectChange(id, patch)
   }
 
-  /** 级联删除缺陷及其维修工单 */
+  /**
+   * 缺陷修改后的未决冲突重算。
+   * 仅状态变化（派工 / 修复回写）不影响等级、尺寸与位置匹配，无需重算。
+   */
+  async function reconcileAfterDefectChange(id: string, patch: Partial<Defect>): Promise<void> {
+    const affectsMatch =
+      'segmentId' in patch ||
+      'type' in patch ||
+      'severity' in patch ||
+      'lengthMm' in patch ||
+      'widthMm' in patch ||
+      'face' in patch ||
+      'positionM' in patch
+    if (!affectsMatch) return
+    const { useReconcileStore } = await import('@/stores/reconcileStore')
+    await useReconcileStore().recomputeAfterDefectUpdate(id)
+  }
+
+  /** 级联删除缺陷及其维修工单，并回收相关未决对账关联（先删除再重算，避免重新命中） */
   async function removeDefect(id: string): Promise<void> {
     await db.transaction('rw', [db.defects, db.workOrders], async () => {
       await db.workOrders.where('defectId').equals(id).delete()
       await db.defects.delete(id)
     })
+    const { useReconcileStore } = await import('@/stores/reconcileStore')
+    await useReconcileStore().resetLinksForDeletedDefects([id])
     selectedIds.delete(id)
   }
 
@@ -241,6 +263,8 @@ export const useDefectStore = defineStore('defect', () => {
       await db.workOrders.where('defectId').anyOf(ids).delete()
       await db.defects.bulkDelete(ids)
     })
+    const { useReconcileStore } = await import('@/stores/reconcileStore')
+    await useReconcileStore().resetLinksForDeletedDefects(ids)
     ids.forEach((id) => selectedIds.delete(id))
     return ids.length
   }
@@ -255,6 +279,8 @@ export const useDefectStore = defineStore('defect', () => {
         defect.severity = severity
         defect.updatedAt = now
       })
+    const { useReconcileStore } = await import('@/stores/reconcileStore')
+    await Promise.all(ids.map((id) => useReconcileStore().recomputeAfterDefectUpdate(id)))
     return ids.length
   }
 
@@ -268,6 +294,8 @@ export const useDefectStore = defineStore('defect', () => {
         defect.type = type
         defect.updatedAt = now
       })
+    const { useReconcileStore } = await import('@/stores/reconcileStore')
+    await Promise.all(ids.map((id) => useReconcileStore().recomputeAfterDefectUpdate(id)))
     return ids.length
   }
 
@@ -281,6 +309,8 @@ export const useDefectStore = defineStore('defect', () => {
         defect.face = face
         defect.updatedAt = now
       })
+    const { useReconcileStore } = await import('@/stores/reconcileStore')
+    await Promise.all(ids.map((id) => useReconcileStore().recomputeAfterDefectUpdate(id)))
     return ids.length
   }
 

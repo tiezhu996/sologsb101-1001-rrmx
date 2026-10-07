@@ -44,7 +44,7 @@ docker compose up -d --build      # 代码改动后重新构建
 | 构建工具 | Vite 6 | 开发服务器端口 22801 |
 | 状态管理 | Pinia（setup store） | `turbineStore` / `bladeStore` / `defectStore` / `workOrderStore` |
 | 路由 | Vue Router 4（history 模式） | nginx 侧用 `try_files $uri $uri/ /index.html` 做 SPA fallback |
-| 本地存储 | Dexie 4（IndexedDB 封装）+ localStorage | 含数据结构版本号与 `upgrade` 升级迁移逻辑 |
+| 本地存储 | Dexie 4（IndexedDB 封装）+ localStorage | 含数据结构版本号与 `upgrade` 升级迁移逻辑（v3 增外委批次对账三表） |
 | 容器化 | Docker 多阶段构建：`node:20-alpine` → `nginx:alpine` | 构建阶段执行类型检查与打包，运行阶段仅托管静态产物 |
 
 ---
@@ -56,7 +56,8 @@ docker compose up -d --build      # 代码改动后重新构建
 | `/turbines` | 机组合账 | Turbine、Blade、Defect | 新建机组并**按叶片数派生叶片记录**、按机型 / 投运年份筛选、卡片回显缺陷总数与未闭环数、编辑时同步增删叶片、级联删除 |
 | `/blades/:id/segments` | 叶片分段与剖面 | Blade、Segment、Defect | 叶片切换、**按段数批量生成展向分段**、单段新增 / 编辑 / 删除、上传剖面图（本地预览）、按检修面查看段内缺陷、行内改状态 |
 | `/defects` | 缺陷标注台 | Defect、Segment | 按机组 / 类型 / 程度 / 面位 / 状态组合筛选（同步 URL query）、单条标注、勾选后批量改等级 / 改类型 / 改状态、批量派工、批量删除 |
-| `/workorders` | 维修工单 | WorkOrder、Defect | 按班组与状态筛选、派工建单、限期跟催（超期高亮）、状态流转 `待派 → 处理中 → 待验收 → 已闭环`、验收回写缺陷为已修复、撤回验收、删除后同步缺陷状态 |
+| `/workorders` | 维修工单 | WorkOrder、Defect | 按班组与状态筛选、派工建单、限期跟催（超期高亮）、状态流转 `待派 → 处理中 → 待验收 → 已闭环`、验收回写缺陷为已修复、撤回验收、删除后同步缺陷状态；**派工固化缺陷快照**，有未决外委冲突的缺陷禁止派工 |
+| `/reconcile`、`/reconcile/:id` | 外委批次对账 | ImportBatch、FieldDefectRow、ReconcileLink、Defect | 粘贴外委离线巡检表（TSV/CSV）建批次，按机组编号、叶片序号、分段区间、面位、类型与位置容差**一对一配对**；尺寸 / 等级不一致两版留存，负责人逐条取本机值或现场值，未决不能派工；同批次重复粘贴判重、写入中断保留进度可重试、本机修改后未决冲突自动重算 |
 | `/report` | 报告与导出 | 全部模型 | 按机组生成巡检报告预览（分级分布、分段明细、工单跟踪）、查看数据结构版本、导出报告 / 全量备份 JSON、导入 JSON（覆盖 / 合并 / 追加）、清空与重新播种 |
 
 ---
@@ -72,7 +73,7 @@ npm run preview    # 本地预览构建产物（http://localhost:22801）
 ```
 
 > 首次打开页面会自动播种演示数据（幂等，只在机组表为空时执行）：
-> **2 台机组 × 各 2 片叶片 × 各 3 个展向分段 × 18 条缺陷 × 4 张工单**，5 个页面打开即有内容。
+> **2 台机组 × 各 2 片叶片 × 各 3 个展向分段 × 19 条缺陷 × 5 张工单 × 1 个外委对账批次（含冲突 / 一致 / 新增各一）**，打开即有内容。
 
 ---
 
@@ -92,15 +93,16 @@ sologsb101-1001/
     ├── public/favicon.svg
     └── src/
         ├── main.ts               # 挂载前先 ensureSeeded()，避免首屏空白
-        ├── App.vue               # 顶部导航（5 个路由 + 数量徽标）、底部数据存储说明
+        ├── App.vue               # 顶部导航（路由 + 数量徽标）、底部数据存储说明
         ├── styles/main.css
-        ├── types/                # turbine.ts blade.ts segment.ts defect.ts workOrder.ts
-        ├── stores/               # turbineStore.ts bladeStore.ts defectStore.ts workOrderStore.ts
+        ├── types/                # turbine.ts blade.ts segment.ts defect.ts workOrder.ts reconcile.ts
+        ├── stores/               # turbineStore.ts bladeStore.ts defectStore.ts workOrderStore.ts reconcileStore.ts
         ├── hooks/                # useDefectFilter.ts useIdbTable.ts
         ├── components/common/    # SeverityTag.vue FilterBar.vue StatBadge.vue EmptyPanel.vue
-        ├── utils/                # db.ts severity.ts report.ts export.ts
-        ├── pages/                # TurbineList.vue BladeSegment.vue DefectBoard.vue WorkOrderList.vue ReportView.vue
-        └── router/index.ts       # /turbines、/blades/:id/segments、/defects、/workorders、/report
+        ├── components/reconcile/ # ConflictTable.vue ImportBatchDialog.vue UnlocatedPanel.vue
+        ├── utils/                # db.ts severity.ts report.ts export.ts inspectionSheet.ts reconcile.ts
+        ├── pages/                # TurbineList.vue BladeSegment.vue DefectBoard.vue WorkOrderList.vue ReconcileCenter.vue ReconcileDetail.vue ReportView.vue
+        └── router/index.ts       # /turbines、/blades/:id/segments、/defects、/workorders、/reconcile、/report
 ```
 
 分层约定：**页面只读 store，跨页状态不放组件内部 state**；`types/` 定义实体与筛选条件，`stores/` 维护列表与派生统计，`hooks/` 封装 Dexie 订阅与缺陷筛选派生值，`utils/` 提供持久化、单位换算与报告导出。
@@ -112,9 +114,10 @@ sologsb101-1001/
 | 项目 | 说明 |
 | --- | --- |
 | 库名 | IndexedDB `gbwindblade`（Dexie 封装） |
-| 结构版本 | `DB_VERSION = 2`，`utils/db.ts` 内含版本号与 `upgrade` 迁移（补全缺陷状态、工单验收字段、分段剖面图字段） |
-| 对象表 | `turbines`、`blades`、`segments`、`defects`、`workOrders`，均按 `id` 主键 + 外键索引 |
-| 级联关系 | 机组 → 叶片 → 展向分段 → 缺陷 → 维修工单；删除上级会级联清理下级记录 |
+| 结构版本 | `DB_VERSION = 3`，`utils/db.ts` 内含版本号与 `upgrade` 迁移（补全缺陷状态、工单验收字段、分段剖面图字段、工单缺陷快照） |
+| 对象表 | `turbines`、`blades`、`segments`、`defects`、`workOrders`，以及外委批次对账三表 `importBatches`、`fieldDefectRows`、`reconcileLinks`，均按 `id` 主键 + 外键索引 |
+| 级联关系 | 机组 → 叶片 → 展向分段 → 缺陷 → 维修工单；删除上级会级联清理下级记录，并回收相关对账关联（未决关联退回「无法定位」） |
+| 外委对账 | 外委交回的离线巡检表按批次导入，**不覆盖本机标注**；按机组编号 / 叶片序号 / 分段区间 / 面位 / 类型 + 位置容差一对一配对；尺寸或等级不一致保留两版，负责人逐条取本机值或现场值；未决前不能生成工单；本机缺陷修改只重算未决冲突，已生成工单与报告按当时版本 |
 | localStorage | `gbwindblade:ui-prefs`（上次查看的机组 / 叶片）、`gbwindblade:db-version`、`gbwindblade:last-backup-at` |
 | 备份 | 「报告与导出」页可导出 / 导入 JSON，导入支持覆盖、按 id 合并、追加（重新分配 id）三种方式 |
 | 演示数据 | 首次进入自动播种，幂等；也可在页面空状态点击「生成演示数据」或报告页「重新播种演示数据」 |

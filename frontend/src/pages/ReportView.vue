@@ -6,6 +6,7 @@ import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import SeverityTag from '@/components/common/SeverityTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import { useTurbineStore } from '@/stores/turbineStore'
+import { useReconcileStore } from '@/stores/reconcileStore'
 import {
   DB_NAME,
   DB_VERSION,
@@ -30,6 +31,7 @@ import { DEFECT_STATE_COLOR, type DefectState } from '@/types/defect'
 import type { BackupPayload } from '@/utils/db'
 
 const turbineStore = useTurbineStore()
+const reconcileStore = useReconcileStore()
 
 const selectedTurbineId = ref<string>(turbineStore.currentTurbineId ?? '')
 
@@ -84,7 +86,10 @@ const dbMeta = computed(() => ({
   blades: turbineStore.blades.length,
   segments: turbineStore.segments.length,
   defects: turbineStore.defects.length,
-  workOrders: turbineStore.workOrders.length
+  workOrders: turbineStore.workOrders.length,
+  importBatches: reconcileStore.batches.length,
+  fieldRows: reconcileStore.fieldRows.length,
+  pendingConflicts: reconcileStore.pendingConflictCount
 }))
 
 /** 面位中文标签（模板内免去类型断言） */
@@ -287,6 +292,10 @@ watch(bladePanels, (panels) => {
           <el-descriptions-item label="缺陷 / 工单">
             {{ dbMeta.defects }} 条 / {{ dbMeta.workOrders }} 张
           </el-descriptions-item>
+          <el-descriptions-item label="外委批次 / 现场记录">
+            {{ dbMeta.importBatches }} 个 / {{ dbMeta.fieldRows }} 条
+          </el-descriptions-item>
+          <el-descriptions-item label="未决对账冲突">{{ dbMeta.pendingConflicts }} 条</el-descriptions-item>
         </el-descriptions>
       </div>
 
@@ -525,6 +534,9 @@ watch(bladePanels, (panels) => {
           <el-descriptions-item label="缺陷">{{ importCounts.defects }}</el-descriptions-item>
           <el-descriptions-item label="工单">{{ importCounts.workOrders }}</el-descriptions-item>
           <el-descriptions-item label="文件版本">v{{ importPayload.dbVersion }}</el-descriptions-item>
+          <el-descriptions-item label="外委批次">{{ importCounts.importBatches ?? 0 }}</el-descriptions-item>
+          <el-descriptions-item label="现场记录">{{ importCounts.fieldDefectRows ?? 0 }}</el-descriptions-item>
+          <el-descriptions-item label="对账关联">{{ importCounts.reconcileLinks ?? 0 }}</el-descriptions-item>
         </el-descriptions>
         <el-radio-group v-model="importMode" class="import-mode">
           <el-radio value="overwrite">覆盖导入（先清空本地全部数据）</el-radio>

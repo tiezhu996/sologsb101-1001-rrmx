@@ -163,10 +163,13 @@ export function buildTurbineReport(
       const defect = defectById.get(order.defectId) as Defect
       const segment = defectToSegment.get(defect.segmentId) as Segment
       const blade = bladeById.get(segment.bladeId) as Blade
+      // 已生成报告的工单口径：等级 / 类型以派工当时快照为准，缺失快照（老工单）回退实时值
+      const type = order.defectSnapshot?.type ?? defect.type
+      const severity = order.defectSnapshot?.severity ?? defect.severity
       return {
         order,
-        defectType: defect.type,
-        severity: defect.severity,
+        defectType: type,
+        severity,
         bladeSerial: blade.serial,
         segmentIndex: segment.index,
         overdue: isOverdue(order, today)

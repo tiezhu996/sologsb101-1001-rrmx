@@ -4,12 +4,14 @@ import type { Blade, BladeMaterial, BladeSerial } from '@/types/blade'
 import type { Segment, SegmentFace } from '@/types/segment'
 import type { Defect, DefectState, DefectType, Severity } from '@/types/defect'
 import type { WorkOrder, WorkOrderState } from '@/types/workOrder'
+import type { FieldDefectRow, ImportBatch, ReconcileLink } from '@/types/reconcile'
+import { isOpenLinkState } from '@/types/reconcile'
 
 /** 本地 IndexedDB 库名 */
 export const DB_NAME = 'gbwindblade'
 
 /** 本地结构版本号：新增 / 修改表结构时必须递增，并补充 upgrade 迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** localStorage 侧的少量元数据键 */
 export const LS_KEYS = {
@@ -38,6 +40,9 @@ export interface BackupPayload {
   segments: Segment[]
   defects: Defect[]
   workOrders: WorkOrder[]
+  importBatches: ImportBatch[]
+  fieldDefectRows: FieldDefectRow[]
+  reconcileLinks: ReconcileLink[]
 }
 
 /** 全部业务表集合，清空与导入共用 */
@@ -46,7 +51,10 @@ export const ALL_TABLES = [
   'blades',
   'segments',
   'defects',
-  'workOrders'
+  'workOrders',
+  'importBatches',
+  'fieldDefectRows',
+  'reconcileLinks'
 ] as const
 
 export class WindBladeDatabase extends Dexie {
@@ -55,6 +63,9 @@ export class WindBladeDatabase extends Dexie {
   segments!: Table<Segment, string>
   defects!: Table<Defect, string>
   workOrders!: Table<WorkOrder, string>
+  importBatches!: Table<ImportBatch, string>
+  fieldDefectRows!: Table<FieldDefectRow, string>
+  reconcileLinks!: Table<ReconcileLink, string>
 
   constructor() {
     super(DB_NAME)
@@ -66,16 +77,34 @@ export class WindBladeDatabase extends Dexie {
       workOrders: 'id, defectId, team, state, updatedAt'
     })
     // v2：分段补充检修面索引，缺陷补充面位 / 状态 / 发现日期索引，工单补充限期索引
+    this.version(2).stores({
+      turbines: 'id, code, model, commissionDate, updatedAt',
+      blades: 'id, turbineId, serial, material, updatedAt',
+      segments: 'id, bladeId, index, face, updatedAt',
+      defects: 'id, segmentId, type, severity, face, state, foundAt, updatedAt',
+      workOrders: 'id, defectId, team, state, dueDate, updatedAt'
+    })
+    // v3：外委批次对账——批次、现场记录、对账关联三张新表；缺陷补来源索引
     this.version(DB_VERSION)
       .stores({
         turbines: 'id, code, model, commissionDate, updatedAt',
         blades: 'id, turbineId, serial, material, updatedAt',
         segments: 'id, bladeId, index, face, updatedAt',
-        defects: 'id, segmentId, type, severity, face, state, foundAt, updatedAt',
-        workOrders: 'id, defectId, team, state, dueDate, updatedAt'
+        defects: 'id, segmentId, type, severity, face, state, foundAt, sourceBatchId, updatedAt',
+        workOrders: 'id, defectId, team, state, dueDate, updatedAt',
+        importBatches: 'id, batchNo, state, importedAt, updatedAt',
+        fieldDefectRows: 'id, batchId, fingerprint, turbineCode, updatedAt',
+        reconcileLinks: 'id, batchId, fieldRowId, defectId, state, updatedAt'
       })
       .upgrade(async (tx) => {
-        // 迁移：历史记录补全 v2 新增字段，避免页面读取到 undefined
+        // v2 → v3 迁移：历史工单补缺陷快照字段（null，展示时回退实时值）
+        await tx
+          .table<WorkOrder>('workOrders')
+          .toCollection()
+          .modify((order) => {
+            if (order.defectSnapshot === undefined) order.defectSnapshot = null
+          })
+        // v1 直接升 v3 时，历史缺陷 / 工单 / 分段字段也需补齐
         await tx
           .table<Defect>('defects')
           .toCollection()
@@ -114,15 +143,55 @@ export function createId(prefix: string): string {
 
 /** 清空全部业务表，供「清空本地数据」与导入前覆盖使用 */
 export async function clearAllTables(): Promise<void> {
-  await db.transaction('rw', [db.turbines, db.blades, db.segments, db.defects, db.workOrders], async () => {
-    await Promise.all([
-      db.turbines.clear(),
-      db.blades.clear(),
-      db.segments.clear(),
-      db.defects.clear(),
-      db.workOrders.clear()
-    ])
-  })
+  await db.transaction(
+    'rw',
+    [
+      db.turbines,
+      db.blades,
+      db.segments,
+      db.defects,
+      db.workOrders,
+      db.importBatches,
+      db.fieldDefectRows,
+      db.reconcileLinks
+    ],
+    async () => {
+      await Promise.all([
+        db.turbines.clear(),
+        db.blades.clear(),
+        db.segments.clear(),
+        db.defects.clear(),
+        db.workOrders.clear(),
+        db.importBatches.clear(),
+        db.fieldDefectRows.clear(),
+        db.reconcileLinks.clear()
+      ])
+    }
+  )
+}
+
+/**
+ * 级联删除缺陷前回收对账关联（须在含 db.reconcileLinks 的事务内调用）：
+ * 未决关联退回「无法定位」并解绑（现场记录保留，负责人可忽略）；已决关联随缺陷删除。
+ */
+export async function detachReconcileLinksForDefects(defectIds: string[]): Promise<void> {
+  if (defectIds.length === 0) return
+  const bound = await db.reconcileLinks.where('defectId').anyOf(defectIds).toArray()
+  for (const link of bound) {
+    if (isOpenLinkState(link.state)) {
+      await db.reconcileLinks.update(link.id, {
+        defectId: null,
+        state: '无法定位',
+        locateReason: link.locateReason ?? '分段区间不存在',
+        differences: [],
+        localSnapshot: null,
+        spawned: false,
+        updatedAt: Date.now()
+      })
+    } else {
+      await db.reconcileLinks.delete(link.id)
+    }
+  }
 }
 
 /** 读取 localStorage 中的 UI 偏好 */
@@ -258,6 +327,9 @@ export async function seedDemoData(): Promise<boolean> {
   const segments: Segment[] = []
   const defects: Defect[] = []
   const workOrders: WorkOrder[] = []
+  const importBatches: ImportBatch[] = []
+  const fieldDefectRows: FieldDefectRow[] = []
+  const reconcileLinks: ReconcileLink[] = []
 
   const blueprints: Array<{
     code: string
@@ -385,6 +457,7 @@ export async function seedDemoData(): Promise<boolean> {
                 spec.order.closedOffsetDays === null
                   ? null
                   : now + spec.order.closedOffsetDays * 24 * 60 * 60 * 1000,
+              defectSnapshot: null,
               createdAt: now,
               updatedAt: now
             })
@@ -396,13 +469,179 @@ export async function seedDemoData(): Promise<boolean> {
 
   await db.transaction(
     'rw',
-    [db.turbines, db.blades, db.segments, db.defects, db.workOrders],
+    [
+      db.turbines,
+      db.blades,
+      db.segments,
+      db.defects,
+      db.workOrders,
+      db.importBatches,
+      db.fieldDefectRows,
+      db.reconcileLinks
+    ],
     async () => {
       await db.turbines.bulkPut(turbines)
       await db.blades.bulkPut(blades)
       await db.segments.bulkPut(segments)
       await db.defects.bulkPut(defects)
       await db.workOrders.bulkPut(workOrders)
+
+      // 外委演示批次：1 条等级冲突（待负责人裁决）+ 1 条一致 + 1 条现场新增缺陷
+      const turbineOne = turbines.find((item) => item.code === 'WT-A01') as Turbine
+      const bladeA = blades.find((item) => item.turbineId === turbineOne.id && item.serial === 'A') as Blade
+      const segA1 = segments.find((item) => item.bladeId === bladeA.id && item.index === 1) as Segment
+      const segA3 = segments.find((item) => item.bladeId === bladeA.id && item.index === 3) as Segment
+      // 第一条缺陷：WT-A01 / A / 第1段 / LE / 前缘腐蚀（播种时 820×36 中度）
+      const conflictDefect = defects.find(
+        (item) => item.segmentId === segA1.id && item.type === '前缘腐蚀'
+      ) as Defect
+      // 第二条缺陷：同段砂眼 12×9 轻度
+      const matchDefect = defects.find(
+        (item) => item.segmentId === segA1.id && item.type === '砂眼'
+      ) as Defect
+
+      const batchId = createId('batch')
+      const makeFieldRow = (
+        line: number,
+        segment: Segment,
+        spec: {
+          type: DefectType
+          severity: Severity
+          lengthMm: number
+          widthMm: number
+          positionM: number
+        },
+        fingerprintSalt: string
+      ): FieldDefectRow => ({
+        id: createId('fld'),
+        batchId,
+        sourceLine: line + 1,
+        fingerprint: `seed|${fingerprintSalt}`,
+        turbineCode: turbineOne.code,
+        bladeSerial: bladeA.serial,
+        segmentStartM: segment.startM,
+        segmentEndM: segment.endM,
+        type: spec.type,
+        severity: spec.severity,
+        lengthMm: spec.lengthMm,
+        widthMm: spec.widthMm,
+        face: segment.face,
+        positionM: spec.positionM,
+        foundAt: dateOffset(-3),
+        inspector: '外委检修一队',
+        createdAt: now,
+        updatedAt: now
+      })
+
+      const rowConflict = makeFieldRow(
+        1,
+        segA1,
+        { type: '前缘腐蚀', severity: '重度', lengthMm: 900, widthMm: 40, positionM: conflictDefect.positionM },
+        'conflict'
+      )
+      const rowMatch = makeFieldRow(
+        2,
+        segA1,
+        { type: '砂眼', severity: '轻度', lengthMm: 12, widthMm: 9, positionM: matchDefect.positionM },
+        'match'
+      )
+      const newPosition = round2(segA3.startM + (segA3.endM - segA3.startM) * 0.72)
+      const rowNew = makeFieldRow(
+        3,
+        segA3,
+        { type: '砂眼', severity: '轻度', lengthMm: 16, widthMm: 10, positionM: newPosition },
+        'new'
+      )
+      fieldDefectRows.push(rowConflict, rowMatch, rowNew)
+
+      const makeLink = (
+        row: FieldDefectRow,
+        defect: Defect | null,
+        state: ReconcileLink['state'],
+        differences: ReconcileLink['differences'],
+        spawned: boolean
+      ): ReconcileLink => ({
+        id: createId('lnk'),
+        batchId,
+        fieldRowId: row.id,
+        defectId: defect ? defect.id : null,
+        state,
+        locateReason: null,
+        differences,
+        fieldSnapshot: {
+          type: row.type,
+          severity: row.severity,
+          lengthMm: row.lengthMm,
+          widthMm: row.widthMm,
+          face: row.face,
+          positionM: row.positionM
+        },
+        localSnapshot: defect
+          ? {
+              type: defect.type,
+              severity: defect.severity,
+              lengthMm: defect.lengthMm,
+              widthMm: defect.widthMm,
+              face: defect.face,
+              positionM: defect.positionM
+            }
+          : null,
+        owner: '',
+        resolution: null,
+        resolvedAt: null,
+        spawned,
+        createdAt: now,
+        updatedAt: now
+      })
+
+      reconcileLinks.push(
+        makeLink(rowConflict, conflictDefect, '冲突待决', ['severity', 'lengthMm', 'widthMm'], false),
+        makeLink(rowMatch, matchDefect, '一致', [], false)
+      )
+
+      // 现场新增缺陷：落本机档并回写来源溯源
+      const spawnedDefect: Defect = {
+        id: createId('dfc'),
+        segmentId: segA3.id,
+        type: rowNew.type,
+        severity: rowNew.severity,
+        lengthMm: rowNew.lengthMm,
+        widthMm: rowNew.widthMm,
+        face: rowNew.face,
+        positionM: rowNew.positionM,
+        foundAt: rowNew.foundAt,
+        state: '待处理',
+        sourceBatchId: batchId,
+        sourceFieldRowId: rowNew.id,
+        createdAt: now,
+        updatedAt: now
+      }
+      defects.push(spawnedDefect)
+      reconcileLinks.push(makeLink(rowNew, spawnedDefect, '已新增', [], true))
+
+      importBatches.push({
+        id: batchId,
+        batchNo: 'WW-202609-03',
+        vendor: '外委检修一队',
+        state: '对账中',
+        rawText: '',
+        fileName: 'WW-202609-03-离线巡检表.tsv',
+        totalRows: 3,
+        ingestedRows: 3,
+        duplicateRows: 0,
+        lastError: '',
+        positionToleranceM: 0.5,
+        rangeToleranceM: 0.1,
+        importedAt: now,
+        reconciledAt: now,
+        createdAt: now,
+        updatedAt: now
+      })
+
+      await db.importBatches.bulkPut(importBatches)
+      await db.fieldDefectRows.bulkPut(fieldDefectRows)
+      await db.defects.bulkPut([spawnedDefect])
+      await db.reconcileLinks.bulkPut(reconcileLinks)
     }
   )
 

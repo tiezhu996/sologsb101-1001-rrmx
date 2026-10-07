@@ -137,6 +137,10 @@ async function submitCreate(): Promise<void> {
   if (!createFormRef.value) return
   const valid = await createFormRef.value.validate().catch(() => false)
   if (!valid) return
+  if (workOrderStore.pendingConflictDefectIds().has(createForm.defectId)) {
+    ElMessage.error('该缺陷存在未决的外委对账冲突，须先到批次对账页裁决后才能派工')
+    return
+  }
   createSubmitting.value = true
   try {
     await workOrderStore.dispatch({
@@ -146,6 +150,8 @@ async function submitCreate(): Promise<void> {
     })
     createVisible.value = false
     ElMessage.success(`已派工给「${createForm.team}」，限期 ${createForm.dueDate}，缺陷状态已置为已派工`)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '派工失败')
   } finally {
     createSubmitting.value = false
   }
@@ -357,8 +363,9 @@ const tableRows = computed(() => workOrderStore.sortedRows)
                 {{ row.segment ? `第 ${row.segment.index} 段 · ${formatRange(row.segment.startM, row.segment.endM)}` : '分段缺失' }}
               </span>
               <span class="muted">
-                {{ row.defect?.type ?? '缺陷已删除' }}｜{{ row.defect ? faceText(row.defect.face) : '—' }}｜
-                {{ row.defect ? `${row.defect.positionM} m` : '—' }}
+                {{ row.view?.type ?? '缺陷已删除' }}｜{{ row.view ? faceText(row.view.face) : '—' }}｜
+                {{ row.view ? `${row.view.positionM} m` : '—' }}
+                <el-tag v-if="row.snapshotStale" size="small" type="info" effect="plain">按派工版本</el-tag>
               </span>
             </div>
           </template>
@@ -366,10 +373,10 @@ const tableRows = computed(() => workOrderStore.sortedRows)
         <el-table-column label="程度" width="180">
           <template #default="{ row }">
             <SeverityTag
-              v-if="row.defect"
-              :severity="row.defect.severity"
-              :length-mm="row.defect.lengthMm"
-              :width-mm="row.defect.widthMm"
+              v-if="row.view"
+              :severity="row.view.severity"
+              :length-mm="row.view.lengthMm"
+              :width-mm="row.view.widthMm"
               size="small"
             />
             <span v-else class="muted">—</span>

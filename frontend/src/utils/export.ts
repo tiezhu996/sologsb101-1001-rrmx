@@ -8,7 +8,16 @@ import {
 } from '@/utils/db'
 import { reportFileName, type TurbineReport } from '@/utils/report'
 
-const COLLECTIONS = ['turbines', 'blades', 'segments', 'defects', 'workOrders'] as const
+const COLLECTIONS = [
+  'turbines',
+  'blades',
+  'segments',
+  'defects',
+  'workOrders',
+  'importBatches',
+  'fieldDefectRows',
+  'reconcileLinks'
+] as const
 
 type CollectionKey = (typeof COLLECTIONS)[number]
 
@@ -24,11 +33,13 @@ export function validateBackup(input: unknown): {
   }
   const obj = input as Partial<BackupPayload>
   if (obj.app !== 'gbwindblade') errors.push('app 字段应为 gbwindblade，文件来源不明')
-  for (const key of COLLECTIONS) {
+  // 五张核心表必须存在；v3 的对账三表缺失时按空集合兼容老备份
+  for (const key of ['turbines', 'blades', 'segments', 'defects', 'workOrders'] as const) {
     if (!Array.isArray(obj[key])) errors.push(`${key} 字段缺失或不是数组`)
   }
   if (errors.length > 0) return { ok: false, errors, payload: null }
 
+  const asArray = <T>(value: T[] | undefined): T[] => (Array.isArray(value) ? value : [])
   const payload: BackupPayload = {
     app: 'gbwindblade',
     dbVersion: typeof obj.dbVersion === 'number' ? obj.dbVersion : DB_VERSION,
@@ -37,20 +48,27 @@ export function validateBackup(input: unknown): {
     blades: obj.blades ?? [],
     segments: obj.segments ?? [],
     defects: obj.defects ?? [],
-    workOrders: obj.workOrders ?? []
+    workOrders: obj.workOrders ?? [],
+    importBatches: asArray(obj.importBatches),
+    fieldDefectRows: asArray(obj.fieldDefectRows),
+    reconcileLinks: asArray(obj.reconcileLinks)
   }
   return { ok: true, errors, payload }
 }
 
 /** 组装当前本地数据的全量备份对象 */
 export async function buildBackupPayload(): Promise<BackupPayload> {
-  const [turbines, blades, segments, defects, workOrders] = await Promise.all([
-    db.turbines.toArray(),
-    db.blades.toArray(),
-    db.segments.toArray(),
-    db.defects.toArray(),
-    db.workOrders.toArray()
-  ])
+  const [turbines, blades, segments, defects, workOrders, importBatches, fieldDefectRows, reconcileLinks] =
+    await Promise.all([
+      db.turbines.toArray(),
+      db.blades.toArray(),
+      db.segments.toArray(),
+      db.defects.toArray(),
+      db.workOrders.toArray(),
+      db.importBatches.toArray(),
+      db.fieldDefectRows.toArray(),
+      db.reconcileLinks.toArray()
+    ])
   return {
     app: 'gbwindblade',
     dbVersion: DB_VERSION,
@@ -59,7 +77,10 @@ export async function buildBackupPayload(): Promise<BackupPayload> {
     blades,
     segments,
     defects,
-    workOrders
+    workOrders,
+    importBatches,
+    fieldDefectRows,
+    reconcileLinks
   }
 }
 
@@ -82,7 +103,10 @@ export function countPayload(payload: BackupPayload): Record<CollectionKey, numb
     blades: payload.blades.length,
     segments: payload.segments.length,
     defects: payload.defects.length,
-    workOrders: payload.workOrders.length
+    workOrders: payload.workOrders.length,
+    importBatches: payload.importBatches.length,
+    fieldDefectRows: payload.fieldDefectRows.length,
+    reconcileLinks: payload.reconcileLinks.length
   }
 }
 
@@ -123,17 +147,37 @@ export async function importBackup(
   overwrite: boolean
 ): Promise<Record<CollectionKey, number>> {
   if (overwrite) await clearAllTables()
-  await db.transaction('rw', [db.turbines, db.blades, db.segments, db.defects, db.workOrders], async () => {
-    await db.turbines.bulkPut(payload.turbines)
-    await db.blades.bulkPut(payload.blades)
-    await db.segments.bulkPut(payload.segments)
-    await db.defects.bulkPut(payload.defects)
-    await db.workOrders.bulkPut(payload.workOrders)
-  })
+  await db.transaction(
+    'rw',
+      [
+        db.turbines,
+        db.blades,
+        db.segments,
+        db.defects,
+        db.workOrders,
+        db.importBatches,
+        db.fieldDefectRows,
+        db.reconcileLinks
+      ],
+    async () => {
+      await db.turbines.bulkPut(payload.turbines)
+      await db.blades.bulkPut(payload.blades)
+      await db.segments.bulkPut(payload.segments)
+      await db.defects.bulkPut(payload.defects)
+      await db.workOrders.bulkPut(payload.workOrders)
+      await db.importBatches.bulkPut(payload.importBatches)
+      await db.fieldDefectRows.bulkPut(payload.fieldDefectRows)
+      await db.reconcileLinks.bulkPut(payload.reconcileLinks)
+    }
+  )
   return countPayload(payload)
 }
 
-/** 追加式导入：为导入数据重新分配 id 并重建外键关系，避免覆盖现有档案 */
+/**
+ * 追加式导入：为导入数据重新分配 id 并重建外键关系，避免覆盖现有档案。
+ * 对账三表（批次 / 现场记录 / 关联）依赖完整外键闭环，追加副本会造成重复现场记录，
+ * 因此追加模式不导入这三表，只导入台账与缺陷 / 工单。
+ */
 export function remapIds(payload: BackupPayload): BackupPayload {
   const turbineIdMap = new Map<string, string>()
   const bladeIdMap = new Map<string, string>()
@@ -158,7 +202,14 @@ export function remapIds(payload: BackupPayload): BackupPayload {
   const defects = payload.defects.map((defect) => {
     const id = createId('dfc')
     defectIdMap.set(defect.id, id)
-    return { ...defect, id, segmentId: segmentIdMap.get(defect.segmentId) ?? defect.segmentId }
+    return {
+      ...defect,
+      id,
+      segmentId: segmentIdMap.get(defect.segmentId) ?? defect.segmentId,
+      // 追加副本不再归属任何外委批次，避免与现有对账关联串线
+      sourceBatchId: undefined,
+      sourceFieldRowId: undefined
+    }
   })
   const workOrders = payload.workOrders.map((order) => ({
     ...order,
@@ -166,5 +217,15 @@ export function remapIds(payload: BackupPayload): BackupPayload {
     defectId: defectIdMap.get(order.defectId) ?? order.defectId
   }))
 
-  return { ...payload, turbines, blades, segments, defects, workOrders }
+  return {
+    ...payload,
+    turbines,
+    blades,
+    segments,
+    defects,
+    workOrders,
+    importBatches: [],
+    fieldDefectRows: [],
+    reconcileLinks: []
+  }
 }

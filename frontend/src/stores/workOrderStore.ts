@@ -6,6 +6,7 @@ import {
   isOverdue,
   nextWorkOrderState,
   WORK_TEAMS,
+  type DefectSnapshot,
   type WorkOrder,
   type WorkOrderState,
   type WorkOrderStat
@@ -15,11 +16,16 @@ import type { Segment } from '@/types/segment'
 import type { Blade } from '@/types/blade'
 import type { Turbine } from '@/types/turbine'
 import { percentOf } from '@/utils/severity'
+import { useReconcileStore } from '@/stores/reconcileStore'
 
-/** 工单列表的一行：工单 + 缺陷 + 分段 + 叶片 + 机组 */
+/** 工单列表的一行：工单 + 缺陷（展示派工当时版本，老工单回退实时值）+ 归属 */
 export interface WorkOrderRow {
   order: WorkOrder
   defect: Defect | null
+  /** 工单与报告使用的缺陷版本：派工快照优先，缺失时回退实时缺陷 */
+  view: DefectSnapshot | null
+  /** 快照版本与当前本机值是否已不一致（本机后来被对账裁决等改过） */
+  snapshotStale: boolean
   segment: Segment | null
   blade: Blade | null
   turbine: Turbine | null
@@ -85,7 +91,25 @@ export const useWorkOrderStore = defineStore('workOrder', () => {
       const segment = defect ? segmentMap.get(defect.segmentId) ?? null : null
       const blade = segment ? bladeMap.get(segment.bladeId) ?? null : null
       const turbine = blade ? turbineMap.get(blade.turbineId) ?? null : null
-      return { order, defect, segment, blade, turbine, overdue: isOverdue(order, today.value) }
+      const view: DefectSnapshot | null =
+        order.defectSnapshot ??
+        (defect
+          ? {
+              type: defect.type,
+              severity: defect.severity,
+              lengthMm: defect.lengthMm,
+              widthMm: defect.widthMm,
+              face: defect.face,
+              positionM: defect.positionM
+            }
+          : null)
+      const snapshotStale =
+        !!order.defectSnapshot &&
+        !!defect &&
+        (order.defectSnapshot.severity !== defect.severity ||
+          Math.round(order.defectSnapshot.lengthMm) !== Math.round(defect.lengthMm) ||
+          Math.round(order.defectSnapshot.widthMm) !== Math.round(defect.widthMm))
+      return { order, defect, view, snapshotStale, segment, blade, turbine, overdue: isOverdue(order, today.value) }
     })
   })
 
@@ -136,15 +160,17 @@ export const useWorkOrderStore = defineStore('workOrder', () => {
     }
   })
 
-  /** 可派工的缺陷：未修复且尚无工单（以缺陷表为准，不能以工单行为准） */
+  /** 可派工的缺陷：未修复且尚无工单（以缺陷表为准，不能以工单行为准）；未决对账冲突未裁决前不能派工 */
   const dispatchableDefects = computed<DispatchOption[]>(() => {
     const dispatched = new Set(orders.value.map((order) => order.defectId))
     const segmentMap = new Map(segments.value.map((segment) => [segment.id, segment]))
     const bladeMap = new Map(blades.value.map((blade) => [blade.id, blade]))
     const turbineMap = new Map(turbines.value.map((turbine) => [turbine.id, turbine]))
+    const blocked = pendingConflictDefectIds()
     const options: DispatchOption[] = []
     defects.value.forEach((defect) => {
       if (defect.state === '已修复' || dispatched.has(defect.id)) return
+      if (blocked.has(defect.id)) return
       const segment = segmentMap.get(defect.segmentId) ?? null
       const blade = segment ? bladeMap.get(segment.bladeId) ?? null : null
       const turbine = blade ? turbineMap.get(blade.turbineId) ?? null : null
@@ -152,6 +178,18 @@ export const useWorkOrderStore = defineStore('workOrder', () => {
     })
     return options
   })
+
+  /** 存在未决对账冲突的缺陷 id（未裁决前不能派工） */
+  function pendingConflictDefectIds(): Set<string> {
+    return new Set(useReconcileStore().pendingConflictDefectIds)
+  }
+
+  /** 派工前校验：存在未决冲突时抛出，由页面提示负责人先裁决 */
+  function assertDispatchable(defectId: string): void {
+    if (pendingConflictDefectIds().has(defectId)) {
+      throw new Error('该缺陷存在未决的外委对账冲突，请先到批次对账页由负责人选择本机值或现场值')
+    }
+  }
 
   function patchFilter(patch: {
     keyword?: string
@@ -180,8 +218,20 @@ export const useWorkOrderStore = defineStore('workOrder', () => {
     return orders.value.filter((order) => order.defectId === defectId)
   }
 
-  /** 派工：新建工单（待派）并把缺陷置为「已派工」 */
+  /** 派工：新建工单（待派）并把缺陷置为「已派工」；同时固化派工当时的缺陷版本快照 */
   async function dispatch(input: DispatchInput): Promise<WorkOrder> {
+    assertDispatchable(input.defectId)
+    const defect = defects.value.find((item) => item.id === input.defectId)
+    const snapshot: DefectSnapshot | null = defect
+      ? {
+          type: defect.type,
+          severity: defect.severity,
+          lengthMm: defect.lengthMm,
+          widthMm: defect.widthMm,
+          face: defect.face,
+          positionM: defect.positionM
+        }
+      : null
     const order = await workOrdersTable.create(
       {
         defectId: input.defectId,
@@ -189,7 +239,8 @@ export const useWorkOrderStore = defineStore('workOrder', () => {
         dueDate: input.dueDate,
         state: '待派',
         acceptor: '',
-        closedAt: null
+        closedAt: null,
+        defectSnapshot: snapshot
       },
       'wo'
     )
@@ -281,6 +332,8 @@ export const useWorkOrderStore = defineStore('workOrder', () => {
     ordersOfDefect,
     dispatch,
     dispatchMany,
+    assertDispatchable,
+    pendingConflictDefectIds,
     updateWorkOrder,
     advanceState,
     acceptOrder,

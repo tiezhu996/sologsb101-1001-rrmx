@@ -30,6 +30,18 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '维修工单', icon: 'Tools' }
   },
   {
+    path: '/reconcile',
+    name: 'reconcile-center',
+    component: () => import('@/pages/ReconcileCenter.vue'),
+    meta: { title: '外委批次对账', icon: 'Connection' }
+  },
+  {
+    path: '/reconcile/:id',
+    name: 'reconcile-detail',
+    component: () => import('@/pages/ReconcileDetail.vue'),
+    meta: { title: '批次对账明细', icon: 'Connection' }
+  },
+  {
     path: '/report',
     name: 'report-view',
     component: () => import('@/pages/ReportView.vue'),
