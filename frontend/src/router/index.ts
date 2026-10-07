@@ -24,6 +24,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '缺陷标注台', icon: 'WarningFilled' }
   },
   {
+    path: '/recon',
+    name: 'recon-board',
+    component: () => import('@/pages/ReconBoard.vue'),
+    meta: { title: '批次对账', icon: 'Checked' }
+  },
+  {
     path: '/workorders',
     name: 'work-order-list',
     component: () => import('@/pages/WorkOrderList.vue'),

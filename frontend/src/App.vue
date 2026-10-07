@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Document, Grid, Odometer, Tools, WarningFilled } from '@element-plus/icons-vue'
+import { Checked, Document, Grid, Odometer, Tools, WarningFilled } from '@element-plus/icons-vue'
 import { useTurbineStore } from '@/stores/turbineStore'
 import { useBladeStore } from '@/stores/bladeStore'
 import { useDefectStore } from '@/stores/defectStore'
 import { useWorkOrderStore } from '@/stores/workOrderStore'
+import { useReconStore } from '@/stores/reconStore'
 import { DB_NAME, DB_VERSION } from '@/utils/db'
 
 const route = useRoute()
@@ -14,6 +15,7 @@ const turbineStore = useTurbineStore()
 const bladeStore = useBladeStore()
 const defectStore = useDefectStore()
 const workOrderStore = useWorkOrderStore()
+const reconStore = useReconStore()
 
 /** 叶片分段页的跳转目标：上次查看的叶片 → 当前机组的首片叶片 → 全库首片叶片 */
 const targetBladeId = computed<string | null>(() => {
@@ -50,6 +52,13 @@ const navItems = computed(() => {
       label: '缺陷标注台',
       icon: WarningFilled,
       badge: String(defectStore.openCount),
+      disabled: false
+    },
+    {
+      path: '/recon',
+      label: '批次对账',
+      icon: Checked,
+      badge: reconStore.pendingConflictCount > 0 ? String(reconStore.pendingConflictCount) : '',
       disabled: false
     },
     {

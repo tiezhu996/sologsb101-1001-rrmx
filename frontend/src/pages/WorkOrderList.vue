@@ -19,6 +19,7 @@ import {
 } from '@/types/workOrder'
 import { FACE_LABEL, formatRange, type SegmentFace } from '@/types/segment'
 import { seedDemoData } from '@/utils/db'
+import { formatSize } from '@/utils/severity'
 
 const router = useRouter()
 const workOrderStore = useWorkOrderStore()
@@ -101,6 +102,18 @@ function stateColor(state: string): string {
 /** 面位中文标签（模板内免去类型断言） */
 function faceText(face: string): string {
   return FACE_LABEL[face as SegmentFace] ?? face
+}
+
+/** 工单快照与缺陷现值是否不一致（不一致时展示「现值」提示，工单仍按派工时版本） */
+function snapshotDiffers(row: WorkOrderRow): boolean {
+  const snapshot = row.order.snapshot
+  const defect = row.defect
+  if (!snapshot || !defect) return false
+  return (
+    snapshot.severity !== defect.severity ||
+    snapshot.lengthMm !== defect.lengthMm ||
+    snapshot.widthMm !== defect.widthMm
+  )
 }
 
 /* ---------------- 新建工单（派工） ---------------- */
@@ -365,13 +378,17 @@ const tableRows = computed(() => workOrderStore.sortedRows)
         </el-table-column>
         <el-table-column label="程度" width="180">
           <template #default="{ row }">
-            <SeverityTag
-              v-if="row.defect"
-              :severity="row.defect.severity"
-              :length-mm="row.defect.lengthMm"
-              :width-mm="row.defect.widthMm"
-              size="small"
-            />
+            <div v-if="row.defect" class="cell-stack">
+              <SeverityTag
+                :severity="row.order.snapshot?.severity ?? row.defect.severity"
+                :length-mm="row.order.snapshot?.lengthMm ?? row.defect.lengthMm"
+                :width-mm="row.order.snapshot?.widthMm ?? row.defect.widthMm"
+                size="small"
+              />
+              <span v-if="snapshotDiffers(row)" class="muted">
+                现值：{{ row.defect.severity }} {{ formatSize(row.defect.lengthMm, row.defect.widthMm) }}
+              </span>
+            </div>
             <span v-else class="muted">—</span>
           </template>
         </el-table-column>
@@ -461,6 +478,14 @@ const tableRows = computed(() => workOrderStore.sortedRows)
           </el-button>
           <el-button link type="primary" @click="createForm.dueDate = dateAfter(14)">+14 天</el-button>
         </el-form-item>
+        <el-alert
+          v-if="workOrderStore.conflictBlockedCount > 0"
+          type="warning"
+          :closable="false"
+          show-icon
+          :title="`有 ${workOrderStore.conflictBlockedCount} 条缺陷存在未决对账冲突，裁决前不能生成工单，请到「批次对账」页处理。`"
+          class="blocked-alert"
+        />
         <el-alert
           v-if="dispatchable.length === 0"
           type="warning"
@@ -554,6 +579,10 @@ const tableRows = computed(() => workOrderStore.sortedRows)
 
 .quick-date {
   margin-left: 8px;
+}
+
+.blocked-alert {
+  margin-bottom: 12px;
 }
 
 .unit {

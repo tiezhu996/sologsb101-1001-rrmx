@@ -9,6 +9,7 @@ import SeverityTag from '@/components/common/SeverityTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import { useBladeStore } from '@/stores/bladeStore'
 import { useDefectStore, type DefectRow } from '@/stores/defectStore'
+import { useReconStore } from '@/stores/reconStore'
 import { useTurbineStore } from '@/stores/turbineStore'
 import { useWorkOrderStore } from '@/stores/workOrderStore'
 import { useDefectFilter } from '@/hooks/useDefectFilter'
@@ -33,6 +34,7 @@ const turbineStore = useTurbineStore()
 const bladeStore = useBladeStore()
 const defectStore = useDefectStore()
 const workOrderStore = useWorkOrderStore()
+const reconStore = useReconStore()
 
 function todayString(): string {
   const date = new Date()
@@ -349,7 +351,16 @@ function openDispatch(rows: DefectRow[]): void {
     ElMessage.warning('请先勾选需要派工的缺陷')
     return
   }
-  dispatchTargets.value = rows
+  // 未决对账冲突的缺陷不能生成工单：先拦截并提示
+  const blocked = rows.filter((row) => reconStore.hasPendingConflict(row.defect.id))
+  const allowed = rows.filter((row) => !reconStore.hasPendingConflict(row.defect.id))
+  if (blocked.length > 0) {
+    ElMessage.warning(
+      `${blocked.length} 条缺陷存在未决对账冲突，需先在「批次对账」页裁决，本次已排除`
+    )
+  }
+  if (allowed.length === 0) return
+  dispatchTargets.value = allowed
   dispatchForm.team = WORK_TEAMS[0]
   const due = new Date()
   due.setDate(due.getDate() + 7)
@@ -575,12 +586,22 @@ const tableRows = computed(() => defectFilter.sortedRows.value)
         <el-table-column label="发现日期" prop="defect.foundAt" width="120" />
         <el-table-column label="状态" width="110">
           <template #default="{ row }">
-            <span
-              class="state-pill"
-              :style="{ color: stateColor(row.defect.state), backgroundColor: stateBg(row.defect.state) }"
-            >
-              {{ row.defect.state }}
-            </span>
+            <div class="cell-stack">
+              <span
+                class="state-pill"
+                :style="{ color: stateColor(row.defect.state), backgroundColor: stateBg(row.defect.state) }"
+              >
+                {{ row.defect.state }}
+              </span>
+              <el-tag
+                v-if="reconStore.hasPendingConflict(row.defect.id)"
+                size="small"
+                type="warning"
+                effect="dark"
+              >
+                对账未决
+              </el-tag>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="工单" min-width="200">

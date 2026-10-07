@@ -163,10 +163,12 @@ export function buildTurbineReport(
       const defect = defectById.get(order.defectId) as Defect
       const segment = defectToSegment.get(defect.segmentId) as Segment
       const blade = bladeById.get(segment.bladeId) as Blade
+      // 工单按派工时的版本留存：有快照用快照，历史数据回退到缺陷现值
+      const version = order.snapshot ?? defect
       return {
         order,
-        defectType: defect.type,
-        severity: defect.severity,
+        defectType: version.type,
+        severity: version.severity,
         bladeSerial: blade.serial,
         segmentIndex: segment.index,
         overdue: isOverdue(order, today)

@@ -1,5 +1,23 @@
+import type { DefectType, Severity } from '@/types/defect'
+import type { SegmentFace } from '@/types/segment'
+
 /** 工单状态流转：待派 → 处理中 → 待验收 → 已闭环 */
 export type WorkOrderState = '待派' | '处理中' | '待验收' | '已闭环'
+
+/**
+ * 派工时的缺陷快照：工单与报告按当时版本留存。
+ * 之后本机缺陷被修改（含对账裁决改值）时，已生成的工单仍按快照展示。
+ */
+export interface DefectSnapshot {
+  type: DefectType
+  severity: Severity
+  lengthMm: number
+  widthMm: number
+  face: SegmentFace
+  positionM: number
+  /** 快照时间戳（派工时刻） */
+  capturedAt: number
+}
 
 /**
  * 维修工单：针对一条缺陷派发的检修任务，验收通过后回写缺陷为已修复。
@@ -16,6 +34,8 @@ export interface WorkOrder {
   acceptor: string
   /** 闭环时间戳，未闭环为 null */
   closedAt: number | null
+  /** 派工时的缺陷快照（历史数据可能为空，展示时回退到缺陷现值） */
+  snapshot?: DefectSnapshot
   createdAt: number
   updatedAt: number
 }

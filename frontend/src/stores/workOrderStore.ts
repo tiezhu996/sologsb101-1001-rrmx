@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { useIdbTable } from '@/hooks/useIdbTable'
+import { useReconStore } from '@/stores/reconStore'
 import {
   createEmptyWorkOrderStat,
   isOverdue,
@@ -59,6 +60,7 @@ export const useWorkOrderStore = defineStore('workOrder', () => {
   const segmentsTable = useIdbTable<Segment>((database) => database.segments, { sortByUpdatedAt: false })
   const bladesTable = useIdbTable<Blade>((database) => database.blades, { sortByUpdatedAt: false })
   const turbinesTable = useIdbTable<Turbine>((database) => database.turbines, { sortByUpdatedAt: false })
+  const reconStore = useReconStore()
 
   const keyword = ref('')
   const teamFilter = ref<string[]>([])
@@ -136,7 +138,7 @@ export const useWorkOrderStore = defineStore('workOrder', () => {
     }
   })
 
-  /** 可派工的缺陷：未修复且尚无工单（以缺陷表为准，不能以工单行为准） */
+  /** 可派工的缺陷：未修复、尚无工单且没有未决对账冲突（以缺陷表为准，不能以工单行为准） */
   const dispatchableDefects = computed<DispatchOption[]>(() => {
     const dispatched = new Set(orders.value.map((order) => order.defectId))
     const segmentMap = new Map(segments.value.map((segment) => [segment.id, segment]))
@@ -145,12 +147,24 @@ export const useWorkOrderStore = defineStore('workOrder', () => {
     const options: DispatchOption[] = []
     defects.value.forEach((defect) => {
       if (defect.state === '已修复' || dispatched.has(defect.id)) return
+      if (reconStore.pendingConflictDefectIds.has(defect.id)) return
       const segment = segmentMap.get(defect.segmentId) ?? null
       const blade = segment ? bladeMap.get(segment.bladeId) ?? null : null
       const turbine = blade ? turbineMap.get(blade.turbineId) ?? null : null
       options.push({ defect, segment, blade, turbine })
     })
     return options
+  })
+
+  /** 因未决对账冲突被拦截、暂不可派工的缺陷数 */
+  const conflictBlockedCount = computed(() => {
+    const dispatched = new Set(orders.value.map((order) => order.defectId))
+    return defects.value.filter(
+      (defect) =>
+        defect.state !== '已修复' &&
+        !dispatched.has(defect.id) &&
+        reconStore.pendingConflictDefectIds.has(defect.id)
+    ).length
   })
 
   function patchFilter(patch: {
@@ -180,8 +194,12 @@ export const useWorkOrderStore = defineStore('workOrder', () => {
     return orders.value.filter((order) => order.defectId === defectId)
   }
 
-  /** 派工：新建工单（待派）并把缺陷置为「已派工」 */
+  /** 派工：新建工单（待派）并把缺陷置为「已派工」；工单留存派工时的缺陷快照 */
   async function dispatch(input: DispatchInput): Promise<WorkOrder> {
+    if (reconStore.hasPendingConflict(input.defectId)) {
+      throw new Error('该缺陷存在未决的对账冲突，请先在「批次对账」页裁决后再派工')
+    }
+    const defect = await defectsTable.getById(input.defectId)
     const order = await workOrdersTable.create(
       {
         defectId: input.defectId,
@@ -189,7 +207,18 @@ export const useWorkOrderStore = defineStore('workOrder', () => {
         dueDate: input.dueDate,
         state: '待派',
         acceptor: '',
-        closedAt: null
+        closedAt: null,
+        snapshot: defect
+          ? {
+              type: defect.type,
+              severity: defect.severity,
+              lengthMm: defect.lengthMm,
+              widthMm: defect.widthMm,
+              face: defect.face,
+              positionM: defect.positionM,
+              capturedAt: Date.now()
+            }
+          : undefined
       },
       'wo'
     )
@@ -197,8 +226,12 @@ export const useWorkOrderStore = defineStore('workOrder', () => {
     return order
   }
 
-  /** 批量派工：同一个班组 + 同一限期 */
+  /** 批量派工：同一个班组 + 同一限期；含未决冲突的缺陷会被整体拦截 */
   async function dispatchMany(defectIds: string[], team: string, dueDate: string): Promise<number> {
+    const blocked = defectIds.filter((defectId) => reconStore.hasPendingConflict(defectId))
+    if (blocked.length > 0) {
+      throw new Error(`${blocked.length} 条缺陷存在未决对账冲突，已中止派工，请先在「批次对账」页裁决`)
+    }
     let count = 0
     for (const defectId of defectIds) {
       await dispatch({ defectId, team, dueDate })
@@ -275,6 +308,7 @@ export const useWorkOrderStore = defineStore('workOrder', () => {
     teamOptions,
     stats,
     dispatchableDefects,
+    conflictBlockedCount,
     patchFilter,
     resetFilters,
     orderById,
